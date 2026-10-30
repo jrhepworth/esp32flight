@@ -1,17 +1,22 @@
-# Weekly check against the original project (theqkash/esp32flight).
-# When upstream has new commits, merge them onto this fork's main in a
-# branch and open a pull request for review. If the merge conflicts with
-# local changes, open an issue instead so it can be resolved by hand.
+# Weekly sync with the original project (theqkash/esp32flight).
+# When upstream has new commits, merge them with this fork's fixes and
+# build the firmware. If both succeed, main is updated automatically and
+# a release with the ready-to-flash OTA file is published. A merge
+# conflict or a failed build leaves main untouched and opens an issue.
 name: Upstream sync
 
 on:
   schedule:
     - cron: "0 7 * * 1"   # Mondays 07:00 UTC
   workflow_dispatch:
+    inputs:
+      test_build:
+        description: "Build the current main even with nothing new (no publish)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
-  pull-requests: write
   issues: write
 
 jobs:
@@ -29,43 +34,57 @@ jobs:
           echo "NEW=$(git rev-list --count HEAD..upstream/main)" >> "$GITHUB_ENV"
           echo "UPSTREAM_SHA=$(git rev-parse --short upstream/main)" >> "$GITHUB_ENV"
 
-      - name: Merge into a sync branch
+      - name: Merge
         if: env.NEW != '0'
         id: merge
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          branch="upstream-sync"
-          git checkout -B "$branch"
           if git merge --no-edit upstream/main; then
-            git push -f origin "$branch"
             echo "result=merged" >> "$GITHUB_OUTPUT"
           else
             git merge --abort
             echo "result=conflict" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Open or update the pull request
-        if: steps.merge.outputs.result == 'merged'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          log=$(git log --oneline HEAD^1..upstream/main | head -40)
-          body=$(printf 'The original project has %s new commit(s) (up to %s). They merge cleanly with this fork'"'"'s fixes.\n\n```\n%s\n```\n\nMerge this, then build and flash as usual.' "$NEW" "$UPSTREAM_SHA" "$log")
-          if gh pr view upstream-sync --json state -q .state 2>/dev/null | grep -q OPEN; then
-            gh pr edit upstream-sync --body "$body"
-          else
-            gh pr create --head upstream-sync --base main \
-              --title "Bring in upstream changes ($UPSTREAM_SHA)" --body "$body"
-          fi
+      - name: Build firmware
+        if: steps.merge.outputs.result == 'merged' || inputs.test_build
+        id: build
+        continue-on-error: true
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.1
+          target: esp32s3
+          path: .
 
-      - name: Report a conflict
-        if: steps.merge.outputs.result == 'conflict'
+      - name: Publish to main and release the OTA file
+        if: steps.merge.outputs.result == 'merged' && steps.build.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          title="Upstream changes conflict with local fixes ($UPSTREAM_SHA)"
+          git push origin HEAD:main
+          ver=$(grep -oE 'PROJECT_VER "[^"]+"' CMakeLists.txt | cut -d'"' -f2 || true)
+          tag="fork-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
+          cp build/esp32flight.bin "esp32flight-${ver:-fork}-ota.bin"
+          log=$(git log --oneline HEAD^1..upstream/main | head -40)
+          notes=$(printf 'Upstream %s merged with this fork'"'"'s fixes and built automatically.\n\nFlash: unlock OTA on the device (gear > System), then upload the .bin in the web panel Settings tab.\n\n```\n%s\n```' "$UPSTREAM_SHA" "$log")
+          gh release create "$tag" "esp32flight-${ver:-fork}-ota.bin" \
+            --title "esp32flight ${ver:-fork} + fixes ($UPSTREAM_SHA)" --notes "$notes"
+
+      - name: Report a problem
+        if: steps.merge.outputs.result == 'conflict' || (steps.merge.outputs.result == 'merged' && steps.build.outcome != 'success')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ steps.merge.outputs.result == 'conflict' && 'do not merge cleanly with' || 'merge but fail to build with' }}
+        run: |
+          title="Upstream $UPSTREAM_SHA needs a hand-merge"
           if ! gh issue list --state open --search "$title in:title" --json number -q '.[0].number' | grep -q .; then
             gh issue create --title "$title" \
-              --body "The original project has $NEW new commit(s) that do not merge cleanly with this fork's changes. They need to be merged by hand."
+              --body "The original project has $NEW new commit(s) that $RESULT this fork's fixes. main was left unchanged."
           fi
+
+      - name: Test build result
+        if: inputs.test_build
+        run: |
+          test "${{ steps.build.outcome }}" = success
+          ls -l build/esp32flight.bin
