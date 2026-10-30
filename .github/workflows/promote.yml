@@ -1,0 +1,55 @@
+# Gate for the weekly Claude improvement routine. It pushes its changes
+# to a claude/* branch; this builds the firmware and runs the host tests,
+# and only if both pass fast-forwards main and publishes a release with
+# the OTA file. A failed build leaves main untouched and opens an issue.
+name: Promote improvements
+
+on:
+  push:
+    branches: ["claude/**"]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Host tests
+        run: sh tools/host_tests.sh
+
+      - name: Build firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.1
+          target: esp32s3
+          path: .
+
+      - name: Fast-forward main and release the OTA file
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor origin/main HEAD || {
+            echo "branch is not based on the current main; not promoting"; exit 1; }
+          log=$(git log --format='- %s' origin/main..HEAD)
+          git push origin HEAD:main
+          ver=$(grep -oE 'PROJECT_VER "[^"]+"' CMakeLists.txt | cut -d'"' -f2 || true)
+          tag="fork-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
+          cp build/esp32flight.bin "esp32flight-${ver:-fork}-ota.bin"
+          notes=$(printf 'Improvements from the weekly review, built and tested automatically.\n\n%s\n\nFlash: unlock OTA on the device (gear > System), then upload the .bin in the web panel Settings tab.' "$log")
+          gh release create "$tag" "esp32flight-${ver:-fork}-ota.bin" \
+            --title "esp32flight ${ver:-fork} + improvements ($(date -u +%Y-%m-%d))" --notes "$notes"
+
+      - name: Report a failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --title "Weekly improvements on ${GITHUB_REF_NAME} failed to build or test" \
+            --body "main was left unchanged. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
