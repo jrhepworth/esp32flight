@@ -6,6 +6,7 @@
 #include <string.h>
 #include "cJSON.h"
 #include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "http_util.h"
@@ -274,6 +275,24 @@ static void localize_and_filter(aircraft_list_t *out, double lat, double lon, in
     out->count = w;
 }
 
+/* Park a source that refused us at the HTTP level: 30 min for 401/403
+ * (access gate, will not change soon), 5 min for 429 (rate limit). */
+static void park_if_gated(int64_t *parked_until_ms, int src, esp_err_t err, int64_t now_ms)
+{
+    int status = err - ESP_ERR_HTTP_BASE;
+    int64_t hold_ms;
+    if (status == 401 || status == 403) {
+        hold_ms = 30 * 60 * 1000;
+    } else if (status == 429) {
+        hold_ms = 5 * 60 * 1000;
+    } else {
+        return;
+    }
+    parked_until_ms[src] = now_ms + hold_ms;
+    ESP_LOGW(TAG, "source %d answered HTTP %d, parked for %d min",
+             src, status, (int)(hold_ms / 60000));
+}
+
 esp_err_t flight_fetch_nearby(double lat, double lon, int radius_nm, aircraft_list_t *out)
 {
     /* Persistent singleton: allocated on the first (early) fetch and kept.
@@ -315,12 +334,23 @@ esp_err_t flight_fetch_nearby(double lat, double lon, int radius_nm, aircraft_li
         "https://opendata.adsb.fi/api/v2/lat/%.4f/lon/%.4f/dist/%d",
         "https://api.airplanes.live/v2/point/%.4f/%.4f/%d",
     };
+    /* Per-source cool-down. A gated aggregator (airplanes.live's 403
+     * "contact us", a 401, or a 429 rate limit) answers the same way
+     * every cycle, so asking again only burns a TLS handshake and a
+     * slot in the union pass. Park it for a while instead; transport
+     * errors are not parked since weak Wi-Fi recovers on its own. */
+    static int64_t s_parked_until_ms[3];
+    int64_t now_ms = esp_timer_get_time() / 1000;
+
     /* The very first fetch skips the union request: it costs a full TLS
      * handshake and the boot screen is waiting. MLAT-only targets join
      * one cycle later and stay (the union runs every cycle after). */
     static bool s_first_fetch = true;
     esp_err_t err = ESP_FAIL;
     for (int i = 0; i < 3; i++) {
+        if (now_ms < s_parked_until_ms[i]) {
+            continue;
+        }
         char url[128];
         snprintf(url, sizeof(url), src_fmt[i], lat, lon, radius_nm);
         /* keep-alive slot per aggregator: steady state re-uses one TLS
@@ -339,12 +369,14 @@ esp_err_t flight_fetch_nearby(double lat, double lon, int radius_nm, aircraft_li
             if (!s_first_fetch) {
                 aircraft_list_t *extra = heap_caps_malloc(sizeof(*extra), MALLOC_CAP_SPIRAM);
                 for (int j = 0; extra != NULL && j < 3; j++) {
-                    if (j == i) {
+                    if (j == i || now_ms < s_parked_until_ms[j]) {
                         continue;
                     }
                     char url2[128];
                     snprintf(url2, sizeof(url2), src_fmt[j], lat, lon, radius_nm);
-                    if (http_get_keepalive(j, url2, buf, FETCH_BUF_SIZE, NULL) != ESP_OK ||
+                    esp_err_t jerr = http_get_keepalive(j, url2, buf, FETCH_BUF_SIZE, NULL);
+                    park_if_gated(s_parked_until_ms, j, jerr, now_ms);
+                    if (jerr != ESP_OK ||
                         parse_point_response(buf, lat, lon, extra) != ESP_OK) {
                         continue;
                     }
@@ -377,6 +409,7 @@ esp_err_t flight_fetch_nearby(double lat, double lon, int radius_nm, aircraft_li
             break;
         }
         ESP_LOGW(TAG, "source %d failed (%s)", i, esp_err_to_name(err));
+        park_if_gated(s_parked_until_ms, i, err, now_ms);
     }
 
     return err;
