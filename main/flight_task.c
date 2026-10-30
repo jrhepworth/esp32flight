@@ -166,7 +166,13 @@ static void stats_update(const aircraft_list_t *list)
         if (ac->alt_baro_ft > s_stats.max_alt_ft) {
             s_stats.max_alt_ft = ac->alt_baro_ft;
         }
-        if (ac->gs_kts > s_stats.max_gs_kt) {
+        /* Fastest-aircraft record (#47): MLAT and TIS-B positions
+         * occasionally jump, and the aggregators derive ground speed from
+         * them, giving 1000+ kt airliners. The jet-stream record for a
+         * subsonic airliner is about 700 kt, so anything beyond 760 kt is
+         * a glitch unless the aircraft is military. */
+        float gs_cap = ac->military ? 1500.0f : 760.0f;
+        if (ac->gs_kts <= gs_cap && ac->gs_kts > s_stats.max_gs_kt) {
             s_stats.max_gs_kt = ac->gs_kts;
         }
         float dkm = ac->dist_nm >= 0 ? ac->dist_nm * 1.852f : 0;
