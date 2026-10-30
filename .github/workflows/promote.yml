@@ -45,6 +45,14 @@ jobs:
           notes=$(printf 'Improvements from the weekly review, built and tested automatically.\n\n%s\n\nFlash: unlock OTA on the device (gear > System), then upload the .bin in the web panel Settings tab.' "$log")
           gh release create "$tag" "esp32flight-${ver:-fork}-ota.bin" \
             --title "esp32flight ${ver:-fork} + improvements ($(date -u +%Y-%m-%d))" --notes "$notes"
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Tell the owner an update is ready
+        if: success() && env.RELEASE_TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --title "New update ready for your screen ($RELEASE_TAG)" --body "$(printf 'A new version of your flight display software is ready: %s\n\nWhat to do:\n1. On the screen, tap the gear icon, open the System tab and turn on **Allow OTA updates**.\n2. Tell Claude: \"a new esp32flight update is ready, the screen is unlocked\".\n\nThere is no rush. Close this issue once it is installed.\n\n@jrhepworth' "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/$RELEASE_TAG")"
 
       - name: Report a failure
         if: failure()
@@ -52,4 +60,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh issue create --title "Weekly improvements on ${GITHUB_REF_NAME} failed to build or test" \
-            --body "main was left unchanged. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            --body "main was left unchanged and the screen is unaffected. Forward this to Claude to sort out. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (cc @jrhepworth)"
