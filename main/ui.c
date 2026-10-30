@@ -309,6 +309,7 @@ static bool          s_radar_view_ok;
 static volatile bool s_radar_busy;
 static char          s_radar_key[48];
 static int64_t       s_radar_partial_ms;   /* nonzero: rendered with missing tiles */
+static int64_t       s_radar_done_ms;      /* last complete render, for the rain refresh */
 static int           s_radar_missing;
 static char          s_radar_want[48];
 static double        s_radar_bbox[4];
@@ -1438,6 +1439,7 @@ static void radar_tiles_job(void)
             /* partial render (offline blip): keep it, retry in 20 s */
             s_radar_missing = view.missing;
             s_radar_partial_ms = view.missing > 0 ? esp_timer_get_time() / 1000 : 0;
+            s_radar_done_ms = esp_timer_get_time() / 1000;
             s_radar_tiles_dsc.header.always_zero = 0;
             s_radar_tiles_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
             s_radar_tiles_dsc.header.w = RADAR_RENDER_W;
@@ -1470,9 +1472,15 @@ static void radar_tiles_want(void)
     char key[48];
     snprintf(key, sizeof(key), "%.3f,%.3f,%d,%.2f", s_home_lat, s_home_lon,
              radius_nm, s_radar_zoom);
-    bool radar_stale = s_radar_partial_ms != 0 &&
-                       esp_timer_get_time() / 1000 - s_radar_partial_ms > 20000;
-    if (strcmp(key, s_radar_key) == 0 && !radar_stale) {
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    bool radar_stale = s_radar_partial_ms != 0 && now_ms - s_radar_partial_ms > 20000;
+    /* The rain frame is baked into the rendered tiles, so an unchanged
+     * view kept the weather from its first render indefinitely (#46).
+     * Recompose every 10 minutes with the overlay on, the same cadence
+     * the screensaver got for #21. */
+    bool rain_stale = settings_get()->rain_overlay && s_radar_view_ok &&
+                      s_radar_done_ms != 0 && now_ms - s_radar_done_ms > 10 * 60 * 1000;
+    if (strcmp(key, s_radar_key) == 0 && !radar_stale && !rain_stale) {
         return;
     }
     double rkm = radius_nm * 1.852 * s_radar_zoom;
@@ -2301,7 +2309,20 @@ static void amb_tiles_job(void)
      * on same-area re-renders (tilemap TM_NO_FLOOD) means a visible retry
      * morphs into the fresh frame instead of flashing dark. */
     uint16_t *scratch = s_amb_tiles;
-    if (lvgl_port_lock(1000)) {
+    /* Refreshing a view that is already on screen (the 10-minute rain
+     * recompose, a partial-tile retry): compose off screen when PSRAM
+     * allows. Writing into the displayed canvas let every LVGL redraw of
+     * the range ring's box show the half-built frame - a blank band
+     * across the map several times an hour (#48). Without the memory
+     * the old in-place path remains. */
+    uint16_t *offscreen = NULL;
+    if (s_amb_view_ok) {
+        offscreen = heap_caps_malloc((size_t)AMB_RENDER_W * AMB_RENDER_H * 2,
+                                     MALLOC_CAP_SPIRAM);
+    }
+    if (offscreen != NULL) {
+        scratch = offscreen;
+    } else if (lvgl_port_lock(1000)) {
         s_amb_view_ok = false;   /* canvas is being rewritten */
         lvgl_port_unlock();
     }
@@ -2338,6 +2359,12 @@ static void amb_tiles_job(void)
 
         if (lvgl_port_lock(-1)) {
         ok = ok && s_amb_tiles != NULL;   /* boot-allocated */
+        if (ok && offscreen != NULL && view.missing > s_amb_missing) {
+            ok = false;   /* keep the more complete frame on screen */
+        }
+        if (ok && offscreen != NULL) {
+            memcpy(s_amb_tiles, offscreen, (size_t)AMB_RENDER_W * AMB_RENDER_H * 2);
+        }
         if (ok) {
             s_amb_view = view;
             s_amb_view_ok = true;
@@ -2362,6 +2389,7 @@ static void amb_tiles_job(void)
         }
         lvgl_port_unlock();
     }
+    free(offscreen);
     ESP_LOGI("ui", "ambient tiles: %s (scale %.2f)", ok ? "ok" : "FAILED",
              (double)scale);
     s_amb_busy = false;
