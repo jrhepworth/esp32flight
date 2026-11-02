@@ -65,7 +65,8 @@ static void set_status(const char *text)
 
 /* Session stats (also exposed on the web panel and the stats view) */
 static struct {
-    uint32_t hexes[1024];
+    uint32_t *seen;          /* open-addressed hex set in PSRAM, 0 = empty */
+    int      seen_cap;       /* slots, power of two */
     int      unique;
     int      max_alt_ft;
     float    max_gs_kt;
@@ -127,21 +128,60 @@ static void count_airline(const aircraft_t *ac)
     }
 }
 
+/* Grow the seen-hex set to new_cap slots, rehashing what is there.
+   Returns false (and keeps the old table) if PSRAM is short. */
+static bool seen_grow(int new_cap)
+{
+    uint32_t *t = heap_caps_calloc(new_cap, sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+    if (t == NULL) {
+        return false;
+    }
+    for (int i = 0; i < s_stats.seen_cap; i++) {
+        uint32_t k = s_stats.seen[i];
+        if (k != 0) {
+            uint32_t j = (k * 2654435761u) & (uint32_t)(new_cap - 1);
+            while (t[j] != 0) {
+                j = (j + 1) & (uint32_t)(new_cap - 1);
+            }
+            t[j] = k;
+        }
+    }
+    free(s_stats.seen);
+    s_stats.seen = t;
+    s_stats.seen_cap = new_cap;
+    return true;
+}
+
+/* Add an aircraft hex to the session set; true if it was not there yet.
+   The set grows as needed, so the unique count no longer sticks at 1024 (#39). */
+static bool seen_insert(uint32_t h)
+{
+    uint32_t key = h | 0x80000000u; /* hexes are 24-bit; the top bit keeps 0 free as "empty" */
+    if (s_stats.unique * 4 >= s_stats.seen_cap * 3 &&
+        !seen_grow(s_stats.seen_cap ? s_stats.seen_cap * 2 : 2048)) {
+        if (s_stats.unique >= s_stats.seen_cap - 1) {
+            return false; /* out of memory and full: stop counting rather than loop */
+        }
+    }
+    uint32_t mask = (uint32_t)(s_stats.seen_cap - 1);
+    uint32_t j = (key * 2654435761u) & mask;
+    while (s_stats.seen[j] != 0) {
+        if (s_stats.seen[j] == key) {
+            return false;
+        }
+        j = (j + 1) & mask;
+    }
+    s_stats.seen[j] = key;
+    s_stats.unique++;
+    return true;
+}
+
 static void stats_update(const aircraft_list_t *list)
 {
     for (int i = 0; i < list->count; i++) {
         const aircraft_t *ac = &list->ac[i];
         uint32_t h = (uint32_t)strtoul(ac->hex[0] == '~' ? ac->hex + 1 : ac->hex, NULL, 16);
-        bool known = false;
-        for (int k = 0; k < s_stats.unique; k++) {
-            if (s_stats.hexes[k] == h) {
-                known = true;
-                break;
-            }
-        }
-        if (!known && s_stats.unique < 1024) {
-            s_stats.hexes[s_stats.unique++] = h;
-
+        if (seen_insert(h)) {
             /* first sighting this session */
             time_t now = time(NULL);
             if (now > 1600000000) {
