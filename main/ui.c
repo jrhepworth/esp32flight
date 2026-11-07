@@ -3063,7 +3063,35 @@ static void retro_map_update(void)
      * classes collapse into 5 quantization steps. Tuned offline against
      * the real tiles. Classes: 0 land, 1 water, 2 road, 3 other. */
     const bool unlift = settings_get()->map_light;
-    for (int y = 0; y < RADAR_H; y++) {
+    /* "Brighter map tiles" leaves OSM tiles in full colour, which the
+     * grayscale classifier below cannot read. Show the colour map itself
+     * instead, dimmed so blips and the sweep stay readable, and clipped
+     * to the scope circle. */
+    const bool colour = unlift;
+    const int r2 = RADAR_R * RADAR_R;
+    for (int y = 0; colour && y < RADAR_H; y++) {
+        uint16_t *dst = &s_retro_map_buf[y * RADAR_W];
+        float sy = hy + (y - RADAR_CY) * k;
+        int dy = y - RADAR_CY;
+        for (int x = 0; x < RADAR_W; x++) {
+            int dx = x - RADAR_CX;
+            uint16_t out = 0;
+            float sx = hx + (x - RADAR_CX) * k;
+            int isx = (int)(RADAR_RENDER_W / 2 + (sx - RADAR_W / 2) / RADAR_K);
+            int isy = (int)(RADAR_RENDER_H / 2 + (sy - RADAR_H / 2) / RADAR_K);
+            if (dx * dx + dy * dy <= r2 &&
+                isx >= 0 && isx < RADAR_RENDER_W &&
+                isy >= 0 && isy < RADAR_RENDER_H) {
+                uint16_t c = s_radar_tiles[isy * RADAR_RENDER_W + isx];
+                int r5 = (c >> 11) & 31, g6 = (c >> 5) & 63, b5 = c & 31;
+                /* ~56% brightness */
+                out = (uint16_t)(((r5 * 9 / 16) << 11) |
+                                 ((g6 * 9 / 16) << 5) | (b5 * 9 / 16));
+            }
+            dst[x] = out;
+        }
+    }
+    for (int y = 0; !colour && y < RADAR_H; y++) {
         uint16_t *dst = &s_retro_map_buf[y * RADAR_W];
         float sy = hy + (y - RADAR_CY) * k;
         for (int x = 0; x < RADAR_W; x++) {
