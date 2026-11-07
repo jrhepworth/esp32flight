@@ -5,6 +5,7 @@
 #include <string.h>
 #include "cJSON.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "http_util.h"
 
 static const char *TAG = "tz";
@@ -16,7 +17,12 @@ typedef struct {
     int  offset_s;
     bool valid;
     bool used;
+    int64_t fetched_us;   /* when the offset was looked up */
 } tz_entry_t;
+
+/* A UTC offset is only true for the moment it was looked up: daylight
+ * saving moves it twice a year. Cached airport offsets expire after this. */
+#define TZ_MAX_AGE_US (6LL * 3600 * 1000000)
 
 static tz_entry_t s_cache[TZ_CACHE_SIZE];
 static int s_next;
@@ -41,24 +47,11 @@ int tz_home_offset(void)
     return s_home_offset;
 }
 
-bool tz_offset_for(const char *key, double lat, double lon, int *offset_s)
+/* Current UTC offset at a location from Open-Meteo (timezone=auto),
+ * which already includes daylight saving for today. */
+static bool fetch_offset(double lat, double lon, int *offset_s)
 {
-    if (key == NULL || key[0] == '\0') {
-        return false;
-    }
-    for (int i = 0; i < TZ_CACHE_SIZE; i++) {
-        if (s_cache[i].used && strcmp(s_cache[i].key, key) == 0) {
-            *offset_s = s_cache[i].offset_s;
-            return s_cache[i].valid;
-        }
-    }
-
-    tz_entry_t *slot = &s_cache[s_next];
-    s_next = (s_next + 1) % TZ_CACHE_SIZE;
-    memset(slot, 0, sizeof(*slot));
-    strlcpy(slot->key, key, sizeof(slot->key));
-    slot->used = true;
-
+    bool ok = false;
     char url[160];
     snprintf(url, sizeof(url),
              "https://api.open-meteo.com/v1/forecast?latitude=%.3f&longitude=%.3f&timezone=auto&forecast_days=1",
@@ -72,13 +65,55 @@ bool tz_offset_for(const char *key, double lat, double lon, int *offset_s)
         if (root != NULL) {
             const cJSON *jo = cJSON_GetObjectItem(root, "utc_offset_seconds");
             if (cJSON_IsNumber(jo)) {
-                slot->offset_s = (int)jo->valuedouble;
-                slot->valid = true;
+                *offset_s = (int)jo->valuedouble;
+                ok = true;
             }
             cJSON_Delete(root);
         }
     }
     free(buf);
+    return ok;
+}
+
+bool tz_refresh_home(double lat, double lon)
+{
+    int off;
+    if (!fetch_offset(lat, lon, &off)) {
+        return false;
+    }
+    if (!s_home_known || off != s_home_offset) {
+        tz_set_home_offset(off);
+    }
+    return true;
+}
+
+bool tz_offset_for(const char *key, double lat, double lon, int *offset_s)
+{
+    if (key == NULL || key[0] == '\0') {
+        return false;
+    }
+    for (int i = 0; i < TZ_CACHE_SIZE; i++) {
+        if (s_cache[i].used && strcmp(s_cache[i].key, key) == 0) {
+            if (s_cache[i].valid &&
+                esp_timer_get_time() - s_cache[i].fetched_us > TZ_MAX_AGE_US) {
+                /* stale (clocks may have changed since): look it up again */
+                s_cache[i].used = false;
+                s_cache[i].key[0] = '\0';
+                break;
+            }
+            *offset_s = s_cache[i].offset_s;
+            return s_cache[i].valid;
+        }
+    }
+
+    tz_entry_t *slot = &s_cache[s_next];
+    s_next = (s_next + 1) % TZ_CACHE_SIZE;
+    memset(slot, 0, sizeof(*slot));
+    strlcpy(slot->key, key, sizeof(slot->key));
+    slot->used = true;
+
+    slot->valid = fetch_offset(lat, lon, &slot->offset_s);
+    slot->fetched_us = esp_timer_get_time();
     if (!slot->valid) {
         /* transport failure: forget the slot so the next lookup retries
          * instead of answering "unknown tz" for the rest of the session */

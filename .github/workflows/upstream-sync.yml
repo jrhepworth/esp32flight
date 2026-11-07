@@ -63,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git push origin HEAD:main
-          ver=$(grep -oE 'PROJECT_VER "[^"]+"' CMakeLists.txt | cut -d'"' -f2 || true)
+          ver=$(grep -oE 'PROJECT_VER "[^"]+"' CMakeLists.txt | head -n1 | cut -d'"' -f2 || true)
           tag="fork-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
           cp build/esp32flight.bin "esp32flight-${ver:-fork}-ota.bin"
           log=$(git log --oneline HEAD^1..upstream/main | head -40)

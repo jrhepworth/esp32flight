@@ -907,6 +907,11 @@ static void flight_task(void *arg)
         /* Weather for the header, refreshed every 15 min */
         int64_t now_ms = esp_timer_get_time() / 1000;
         if (primed && (last_weather_ms < 0 || now_ms - last_weather_ms > 15 * 60 * 1000)) {
+            /* The home UTC offset changes when the clocks go forward or
+             * back: re-check it here so the header clock follows within
+             * 15 min (it used to stay on the boot-time offset until the
+             * next restart). Also recovers a lookup that failed at boot. */
+            tz_refresh_home(lat, lon);
             if (weather_fetch(lat, lon, &wx) == ESP_OK) {
                 char wbuf[96];
                 bool fahr = settings_get()->temp_f;
