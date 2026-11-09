@@ -5,14 +5,25 @@
 #include "cJSON.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "http_util.h"
 #include "settings.h"
 #include "routes.h"
 
 static const char *TAG = "faflight";
 
-#define FA_CACHE_SIZE 96
+/* Sized for a busy sky: with fewer slots than airline callsigns in range,
+ * the ring evicted flights still on screen and fetched them again every
+ * cycle, which is what burned through AeroAPI credit (#37). Lives in PSRAM. */
+#define FA_CACHE_SIZE 512
 #define FA_BUF_SIZE   (48 * 1024)
+
+/* Hard ceiling on AeroAPI calls per 24 h. Each lookup is billed, and the
+ * free Personal tier's monthly credit covers roughly 1000 of them, so 30 a
+ * day stays inside it whatever the traffic. Flights over the budget simply
+ * show their callsign until the window rolls over. */
+#define FA_DAILY_BUDGET 30
+#define FA_DAY_US       (24LL * 3600 * 1000000)
 
 typedef struct {
     char callsign[9];
@@ -20,12 +31,14 @@ typedef struct {
     bool used;
 } fa_entry_t;
 
-static fa_entry_t s_cache[FA_CACHE_SIZE];
+static fa_entry_t *s_cache;     /* FA_CACHE_SIZE entries, allocated on first fetch */
 static int s_next;
+static int64_t s_window_start_us;
+static int s_window_calls;
 
 const char *faflight_get_cached(const char *callsign)
 {
-    if (callsign == NULL || callsign[0] == '\0') {
+    if (callsign == NULL || callsign[0] == '\0' || s_cache == NULL) {
         return NULL;
     }
     for (int i = 0; i < FA_CACHE_SIZE; i++) {
@@ -46,6 +59,21 @@ const char *faflight_fetch(const char *callsign)
     if (key[0] == '\0') {
         return NULL;
     }
+    if (s_cache == NULL) {
+        s_cache = heap_caps_calloc(FA_CACHE_SIZE, sizeof(fa_entry_t), MALLOC_CAP_SPIRAM);
+        if (s_cache == NULL) {
+            return NULL;
+        }
+    }
+    int64_t now = esp_timer_get_time();
+    if (s_window_calls == 0 || now - s_window_start_us >= FA_DAY_US) {
+        s_window_start_us = now;
+        s_window_calls = 0;
+    }
+    if (s_window_calls >= FA_DAILY_BUDGET) {
+        return NULL;    /* out of budget: not cached, retried after the window */
+    }
+    s_window_calls++;
 
     fa_entry_t *slot = &s_cache[s_next];
     s_next = (s_next + 1) % FA_CACHE_SIZE;
