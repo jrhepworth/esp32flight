@@ -84,6 +84,11 @@ esp_err_t wifi_mgr_start(void)
         strlcpy((char *)wifi_config.sta.ssid, st->wifi_ssid, sizeof(wifi_config.sta.ssid));
         strlcpy((char *)wifi_config.sta.password, st->wifi_pass, sizeof(wifi_config.sta.password));
         wifi_config.sta.threshold.authmode = st->wifi_pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+        /* the default fast scan joins the first matching AP it hears,
+         * often a distant mesh node or extender; scan every channel and
+         * take the strongest (also on each reconnect) */
+        wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
         ESP_LOGI(TAG, "connecting to \"%s\"", st->wifi_ssid);
     } else {
