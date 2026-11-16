@@ -206,6 +206,9 @@ retry_fresh:
         }
     } else {
         esp_http_client_set_url(s_ka_client[slot], url);
+        /* the timeout is fixed at init; one slot serves callers with
+         * different budgets (primary fetch vs. the quick union pass) */
+        esp_http_client_set_timeout_ms(s_ka_client[slot], timeout_ms);
     }
 
     esp_err_t err = esp_http_client_perform(s_ka_client[slot]);

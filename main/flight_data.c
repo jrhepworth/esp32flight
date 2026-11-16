@@ -374,7 +374,12 @@ esp_err_t flight_fetch_nearby(double lat, double lon, int radius_nm, aircraft_li
                     }
                     char url2[128];
                     snprintf(url2, sizeof(url2), src_fmt[j], lat, lon, radius_nm);
-                    esp_err_t jerr = http_get_keepalive(j, url2, buf, FETCH_BUF_SIZE, NULL);
+                    /* short budget: an unreachable extra source is not
+                     * parked (transport error), so at the default 12 s
+                     * (doubled by the stale-socket retry) it stalled every
+                     * cycle on weak Wi-Fi; the aircraft are already in hand */
+                    esp_err_t jerr = http_get_keepalive_t(j, url2, buf, FETCH_BUF_SIZE,
+                                                          NULL, 5000);
                     park_if_gated(s_parked_until_ms, j, jerr, now_ms);
                     if (jerr != ESP_OK ||
                         parse_point_response(buf, lat, lon, extra) != ESP_OK) {
