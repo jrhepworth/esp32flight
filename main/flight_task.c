@@ -655,6 +655,7 @@ static void flight_task(void *arg)
     bool first_shown = false;
     int fetch_attempts = 0;
     int64_t last_weather_ms = -1;
+    int64_t weather_every_ms = 15 * 60 * 1000;
     int64_t last_update_check_ms = -1;
     static weather_t wx;
 #ifdef APKFLIGHT
@@ -906,13 +907,17 @@ static void flight_task(void *arg)
         }
         /* Weather for the header, refreshed every 15 min */
         int64_t now_ms = esp_timer_get_time() / 1000;
-        if (primed && (last_weather_ms < 0 || now_ms - last_weather_ms > 15 * 60 * 1000)) {
+        if (primed && (last_weather_ms < 0 || now_ms - last_weather_ms > weather_every_ms)) {
             /* The home UTC offset changes when the clocks go forward or
              * back: re-check it here so the header clock follows within
              * 15 min (it used to stay on the boot-time offset until the
              * next restart). Also recovers a lookup that failed at boot. */
             tz_refresh_home(lat, lon);
-            if (weather_fetch(lat, lon, &wx) == ESP_OK) {
+            bool wx_ok = weather_fetch(lat, lon, &wx) == ESP_OK;
+            /* a failed fetch (weak link, API hiccup) left the header blank
+             * or stale for the full 15 min: try again in 2 instead */
+            weather_every_ms = (wx_ok ? 15 : 2) * 60 * 1000;
+            if (wx_ok) {
                 char wbuf[96];
                 bool fahr = settings_get()->temp_f;
                 float temp = fahr ? wx.temp_c * 9.0f / 5.0f + 32.0f : wx.temp_c;
