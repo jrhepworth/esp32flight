@@ -95,6 +95,13 @@ esp_err_t wifi_mgr_start(void)
         ESP_LOGW(TAG, "no SSID configured; Wi-Fi up for scanning only");
     }
     ESP_ERROR_CHECK(esp_wifi_start());
+    /* mains-powered display: the default modem sleep skips beacons, which
+     * on a weak link adds latency and lets the AP drop us (beacon
+     * timeout). Stay awake; not fatal where the radio ignores it (Tab5). */
+    esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ps_err != ESP_OK) {
+        ESP_LOGW(TAG, "power save off failed: %s", esp_err_to_name(ps_err));
+    }
     return ESP_OK;
 }
 
